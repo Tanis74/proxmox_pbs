@@ -1,0 +1,56 @@
+---
+# PBS Sync Job — replicates datastore to a local path (USB HDD) for offsite rotation.
+# The USB HDD mount itself is NOT managed by this role — disks are physically rotated.
+# This role only creates the PBS Sync Job configuration.
+
+- name: "sync | Check if sync job already exists"
+  ansible.builtin.command: "proxmox-backup-manager sync-job list --output-format json"
+  register: __pbs_sync_job_list
+  changed_when: false
+  become: true
+
+- name: "sync | Parse sync job names"
+  ansible.builtin.set_fact:
+    __pbs_sync_job_exists: "{{ 'pbs-offsite-sync' in (__pbs_sync_job_list.stdout | from_json | map(attribute='id') | list) }}"
+
+- name: "sync | Create offsite sync job"
+  ansible.builtin.command: >
+    proxmox-backup-manager sync-job create pbs-offsite-sync
+    --remote {{ proxmox_pbs_sync_remote_path }}
+    --remote-store {{ proxmox_pbs_datastore_name }}
+    --schedule "{{ proxmox_pbs_sync_schedule }}"
+    --remove-vanished true
+  become: true
+  changed_when: true
+  when: not __pbs_sync_job_exists | bool
+
+- name: "sync | Get current sync job config for comparison"
+  ansible.builtin.command: "proxmox-backup-manager sync-job list --output-format json"
+  register: __pbs_sync_config
+  changed_when: false
+  become: true
+  when: __pbs_sync_job_exists | bool
+
+- name: "sync | Parse current sync settings"
+  ansible.builtin.set_fact:
+    __pbs_current_sync: "{{ __pbs_sync_config.stdout | from_json | selectattr('id', 'eq', 'pbs-offsite-sync') | list | first }}"
+  when: __pbs_sync_job_exists | bool
+
+- name: "sync | Check if sync job update is needed"
+  ansible.builtin.set_fact:
+    __pbs_sync_needs_update: "{{
+      __pbs_current_sync['schedule'] | default('') != proxmox_pbs_sync_schedule or
+      __pbs_current_sync['remote'] | default('') != proxmox_pbs_sync_remote_path
+    }}"
+  when: __pbs_sync_job_exists | bool
+
+- name: "sync | Update sync job schedule and path"
+  ansible.builtin.command: >
+    proxmox-backup-manager sync-job update pbs-offsite-sync
+    --schedule "{{ proxmox_pbs_sync_schedule }}"
+    --remote {{ proxmox_pbs_sync_remote_path }}
+  become: true
+  changed_when: true
+  when:
+    - __pbs_sync_job_exists | bool
+    - __pbs_sync_needs_update | bool

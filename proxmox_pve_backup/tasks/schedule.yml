@@ -1,0 +1,65 @@
+---
+# Manage VZDump backup schedule jobs on Proxmox VE.
+# Jobs are stored in /etc/pve/jobs.cfg and executed by pvescheduler daemon.
+# API: /cluster/backup (pvesh get/create/set/delete)
+
+- name: "schedule | Get existing backup jobs"
+  ansible.builtin.command: "pvesh get /cluster/backup --output-format json"
+  register: __pve_backup_jobs_raw
+  changed_when: false
+
+- name: "schedule | Parse backup job IDs"
+  ansible.builtin.set_fact:
+    __pve_backup_jobs: "{{ __pve_backup_jobs_raw.stdout | from_json }}"
+
+# Expected prune-backups value from our configuration
+- name: "schedule | Build expected prune-backups string"
+  ansible.builtin.set_fact:
+    __pve_expected_prune: "keep-daily={{ proxmox_pve_backup_prune_daily }},keep-weekly={{ proxmox_pve_backup_prune_weekly }},keep-monthly={{ proxmox_pve_backup_prune_monthly }}"
+
+- name: "schedule | Create VZDump backup job"
+  ansible.builtin.command: >
+    pvesh create /cluster/backup
+    --all {{ 1 if proxmox_pve_backup_all else 0 }}
+    --storage {{ proxmox_pve_backup_pbs_datastore }}
+    --schedule "{{ proxmox_pve_backup_schedule }}"
+    --compress {{ proxmox_pve_backup_compress }}
+    --prune-backups "{{ __pve_expected_prune }}"
+    --notification-mode {{ proxmox_pve_backup_notification_mode }}
+  register: __pve_backup_job_created
+  changed_when: true
+  when: __pve_backup_jobs | length == 0
+
+- name: "schedule | Check if existing job matches desired configuration"
+  ansible.builtin.set_fact:
+    __pve_job_matches: "{{
+      __pve_backup_jobs | length > 0
+      and __pve_backup_jobs[0].schedule | default('') == proxmox_pve_backup_schedule
+      and __pve_backup_jobs[0].storage | default('') == proxmox_pve_backup_pbs_datastore
+      and (__pve_backup_jobs[0].all | default(false)) == proxmox_pve_backup_all
+    }}"
+  when: __pve_backup_jobs | length > 0
+
+- name: "schedule | Update VZDump backup job if configuration differs"
+  ansible.builtin.command: >
+    pvesh set /cluster/backup/{{ __pve_backup_jobs[0].id }}
+    --schedule "{{ proxmox_pve_backup_schedule }}"
+    --compress {{ proxmox_pve_backup_compress }}
+    --prune-backups "{{ __pve_expected_prune }}"
+    --notification-mode {{ proxmox_pve_backup_notification_mode }}
+  register: __pve_backup_job_updated
+  changed_when: true
+  when:
+    - __pve_backup_jobs | length > 0
+    - not __pve_job_matches | bool
+
+- name: "schedule | Confirm backup job status"
+  ansible.builtin.debug:
+    msg: >
+      {% if __pve_backup_jobs | length == 0 %}
+      VZDump backup job created: schedule={{ proxmox_pve_backup_schedule }}, storage={{ proxmox_pve_backup_pbs_datastore }}.
+      {% elif not __pve_job_matches | bool %}
+      VZDump backup job updated to match desired configuration.
+      {% else %}
+      VZDump backup job already configured: schedule={{ proxmox_pve_backup_schedule }}.
+      {% endif %}

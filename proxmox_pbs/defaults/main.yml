@@ -1,0 +1,70 @@
+---
+# Installation
+proxmox_pbs_version: "4.2.3-1"            # Pinned version (IaC principle). "" = latest (explicit choice)
+proxmox_pbs_repo_type: "no-subscription"  # "no-subscription" | "enterprise"
+proxmox_pbs_verify_gpg: true              # Verify GPG key checksums
+proxmox_pbs_configure_debian_repos: false # Configure Debian base repos (usually done by os_packages)
+proxmox_pbs_remove_enterprise: true       # Remove enterprise repo if present
+
+# Host identity
+proxmox_pbs_hostname: "pbs"
+proxmox_pbs_domain: "lan.infracode.cz"
+
+# Network (/etc/hosts)
+proxmox_pbs_configure_hosts: true
+proxmox_pbs_ip: "10.10.10.201"
+
+# Swap (OOM safety net for GC/verify on Celeron)
+proxmox_pbs_swap_size_mb: 2048            # Swap file size in MB (0 = skip creation)
+proxmox_pbs_swap_path: "/swapfile"
+
+# Datastore
+proxmox_pbs_datastore_name: "pbs-datastore"
+proxmox_pbs_datastore_path: "/mnt/pbs-datastore"
+proxmox_pbs_datastore_fstype: "ext4"
+proxmox_pbs_datastore_mount_opts: "defaults,noatime"
+proxmox_pbs_manage_datastore_disk: true   # Format + mount a dedicated disk/partition
+proxmox_pbs_datastore_device: ""          # Empty = auto-discover; set to override (/dev/sda2)
+
+# Schedules (native PBS calendar event syntax)
+# HH:MM = daily at that time, day HH:MM = weekly on that day
+proxmox_pbs_prune_schedule: "03:00"
+proxmox_pbs_gc_schedule: "04:00"
+proxmox_pbs_verify_schedule: "sun 05:00"
+
+# Retention policy (prune)
+proxmox_pbs_keep_daily: 7
+proxmox_pbs_keep_weekly: 4
+proxmox_pbs_keep_monthly: 3
+proxmox_pbs_keep_yearly: 0                  # Number of yearly backups to keep. 0 = omit flag (no yearly retention)
+
+# Auth — backup user for Proxmox VE
+proxmox_pbs_backup_user: "backup@pbs"
+proxmox_pbs_backup_token_name: "pve-backup"
+proxmox_pbs_backup_token_comment: "Proxmox VE backup access"
+
+# Auth — monitoring user (read-only, prepares infrastructure for future metrics collection)
+proxmox_pbs_monitor_user: "monitor@pbs"
+proxmox_pbs_monitor_token_name: "alloy-metrics"
+proxmox_pbs_monitor_token_comment: "Alloy PBS metrics scraping"
+
+# Token storage (manual — operator saves to SOPS after first run)
+proxmox_pbs_store_token_in_sops: true
+proxmox_pbs_token_sops_file: "{{ inventory_dir }}/group_vars/pbs.sops.yml"
+# Force token recreation even if it already exists (useful for rotation)
+proxmox_pbs_force_token: false
+# Auto-save tokens to SOPS file without displaying secrets in console
+proxmox_pbs_auto_save_token: false
+# Age public key for SOPS encryption
+proxmox_pbs_sops_age_public_key: ""
+
+# Sync Job (offsite to USB HDD)
+proxmox_pbs_sync_enabled: false
+proxmox_pbs_sync_remote_path: "/mnt/usb-backup"
+proxmox_pbs_sync_schedule: "mon 02:00"
+proxmox_pbs_sync_keep_daily: 7
+proxmox_pbs_sync_keep_weekly: 4
+proxmox_pbs_sync_keep_monthly: 3
+
+# Firewall is managed by the sec_nft role, not here.
+# PBS is in mgmt VLAN — no additional firewall rules needed.

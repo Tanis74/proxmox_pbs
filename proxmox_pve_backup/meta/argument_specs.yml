@@ -1,0 +1,51 @@
+---
+argument_specs:
+  main:
+    short_description: "Configure Proxmox VE to use PBS: register storage, VZDump backup schedules"
+    options:
+      proxmox_pve_backup_pbs_server:
+        type: str
+        required: true
+        description: "PBS server IP or hostname"
+      proxmox_pve_backup_pbs_datastore:
+        type: str
+        required: true
+        description: "PBS datastore name"
+      proxmox_pve_backup_pbs_username:
+        type: str
+        required: true
+        description: "PBS API token ID (user@realm!token-name)"
+      proxmox_pve_backup_pbs_fingerprint:
+        type: str
+        required: true
+        description: "PBS certificate SHA-256 fingerprint"
+      proxmox_pve_backup_schedule:
+        type: str
+        default: "daily 02:00"
+        description: "VZDump schedule in systemd calendar event format"
+      proxmox_pve_backup_all:
+        type: bool
+        default: true
+        description: "Backup all VM/LXC on the host"
+      proxmox_pve_backup_compress:
+        type: str
+        default: "zstd"
+        choices: ["0", "1", "gzip", "lzo", "zstd"]
+        description: "Compression algorithm for backup dumps"
+      proxmox_pve_backup_prune_daily:
+        type: int
+        default: 7
+        description: "Keep N daily backups"
+      proxmox_pve_backup_prune_weekly:
+        type: int
+        default: 4
+        description: "Keep N weekly backups"
+      proxmox_pve_backup_prune_monthly:
+        type: int
+        default: 3
+        description: "Keep N monthly backups"
+      proxmox_pve_backup_notification_mode:
+        type: str
+        default: "auto"
+        choices: ["auto", "legacy-sendmail", "notification-system"]
+        description: "Notification mode for backup job events"

@@ -1,0 +1,65 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  tasks:
+    - name: "Verify | Check PBS packages are installed"
+      ansible.builtin.package_facts:
+        manager: apt
+    - name: "Verify | Assert proxmox-backup-server is installed"
+      ansible.builtin.assert:
+        that:
+          - "'proxmox-backup-server' in ansible_facts.packages"
+        fail_msg: "proxmox-backup-server package is not installed"
+        success_msg: "proxmox-backup-server package is installed"
+
+    - name: "Verify | Gather service facts"
+      ansible.builtin.service_facts:
+
+    - name: "Verify | Assert PBS services are running"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['proxmox-backup.service'].state == 'running'
+          - ansible_facts.services['proxmox-backup-proxy.service'].state == 'running'
+        fail_msg: "PBS services are not running"
+        success_msg: "PBS services are running"
+
+    - name: "Verify | Check PBS web UI responds on port 8007"
+      ansible.builtin.uri:
+        url: "https://localhost:8007"
+        validate_certs: false
+        status_code: [200, 401, 302, 303]
+      register: __pbs_web_ui
+      failed_when: false
+
+    - name: "Verify | Assert PBS web UI is reachable"
+      ansible.builtin.assert:
+        that:
+          - __pbs_web_ui.status in [200, 401, 302, 303]
+        fail_msg: "PBS web UI is not responding on port 8007"
+        success_msg: "PBS web UI is responding on port 8007"
+
+    - name: "Verify | Check APT repo is configured"
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/proxmox-pbs.sources
+      register: __pbs_repo_file
+
+    - name: "Verify | Assert PBS APT repo file exists (deb822 format)"
+      ansible.builtin.assert:
+        that:
+          - __pbs_repo_file.stat.exists
+        fail_msg: "PBS APT repository file not found"
+        success_msg: "PBS APT repository file exists (.sources)"
+
+    - name: "Verify | Check PBS package is held"
+      ansible.builtin.command: apt-mark showhold
+      register: __pbs_hold
+      changed_when: false
+
+    - name: "Verify | Assert proxmox-backup-server is held"
+      ansible.builtin.assert:
+        that:
+          - "'proxmox-backup-server' in __pbs_hold.stdout"
+        fail_msg: "proxmox-backup-server is not held"
+        success_msg: "proxmox-backup-server is held"
+      when: proxmox_pbs_version | default('') != ''

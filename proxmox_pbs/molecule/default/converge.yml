@@ -1,0 +1,25 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  tasks:
+    - name: "Include proxmox_pbs role"
+      ansible.builtin.include_role:
+        name: devops.platform.proxmox_pbs
+      vars:
+        # Docker container has no real block devices for datastore
+        proxmox_pbs_manage_datastore_disk: false
+        # Debian base repos already present in the Docker image
+        proxmox_pbs_configure_debian_repos: false
+        # Don't verify GPG in test (key may change upstream)
+        proxmox_pbs_verify_gpg: false
+        # Host identity for test container
+        proxmox_pbs_hostname: "pbs-test"
+        proxmox_pbs_domain: "test.local"
+        proxmox_pbs_configure_hosts: false
+        # Skip swap in Docker (no fallocate)
+        proxmox_pbs_swap_size_mb: 0
+        # Skip firewall in Docker (no ufw)
+        proxmox_pbs_configure_firewall: false
+        # Skip sync in Docker (no USB HDD)
+        proxmox_pbs_sync_enabled: false

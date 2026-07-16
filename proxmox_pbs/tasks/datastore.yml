@@ -1,0 +1,283 @@
+---
+# Datastore provisioning: disk discovery → format → mount → create → schedules.
+# Disk part follows the data_disk role pattern with a quick-exit guard.
+# Datastore/prune/verify management uses proxmox-backup-manager CLI (no Ansible module for PBS).
+#
+# PBS 4.x architecture:
+#   - Datastore: comment, gc-schedule (no prune-schedule, no keep-*)
+#   - Prune job: schedule + retention (keep-daily/weekly/monthly/yearly)
+#   - Verify job: schedule + verification options (separate entity)
+#   - GC schedule: on datastore directly (--gc-schedule)
+
+# --- Part A: Disk provisioning (data_disk pattern) ---
+
+- name: "datastore | Gather mount facts"
+  ansible.builtin.setup:
+    gather_subset: mounts
+  when: ansible_facts.mounts is not defined
+
+- name: "datastore | Check if datastore path is already mounted"
+  ansible.builtin.set_fact:
+    __datastore_already_mounted: "{{ true if (ansible_facts.mounts | selectattr('mount', 'eq', proxmox_pbs_datastore_path) | list | length > 0) else false }}"
+
+- name: "datastore | Provision disk"
+  when:
+    - proxmox_pbs_manage_datastore_disk | bool
+    - not __datastore_already_mounted | bool
+  block:
+    # --- Discovery ---
+    # Two strategies:
+    #   A) proxmox_pbs_datastore_device is set explicitly (e.g. /dev/sda2) → use it directly
+    #   B) proxmox_pbs_datastore_device is empty → auto-discover a CLEAN disk (no partitions)
+    # For the documented single-SSD topology (sda1=root, sda2=datastore), strategy A is required.
+    - name: "datastore | Use specified datastore device"
+      ansible.builtin.set_fact:
+        __datastore_device: "{{ proxmox_pbs_datastore_device }}"
+      when: proxmox_pbs_datastore_device | length > 0
+
+    - name: "datastore | Discover unpartitioned block device"
+      ansible.builtin.set_fact:
+        __datastore_device: "/dev/{{ item.key }}"
+      loop: "{{ ansible_devices | dict2items }}"
+      when:
+        - proxmox_pbs_datastore_device | length == 0
+        - item.value.partitions | length == 0
+        - item.key is not match("^sr")
+        - item.key is not match("^loop")
+        - __datastore_device is not defined
+
+    - name: "datastore | Fail if no suitable disk found"
+      ansible.builtin.fail:
+        msg: >
+          No suitable block device found for PBS datastore.
+          If your datastore is a partition on an already-partitioned disk
+          (e.g. /dev/sda2 on a single-SSD NUC), set proxmox_pbs_datastore_device
+          explicitly in your inventory. Auto-discovery only works for clean
+          unpartitioned disks (e.g. a dedicated second drive).
+          Set proxmox_pbs_manage_datastore_disk to false if the disk is already
+          provisioned and mounted.
+      when: __datastore_device is not defined
+
+    - name: "datastore | Display discovered device"
+      ansible.builtin.debug:
+        msg: "Found datastore device: {{ __datastore_device }}"
+
+    - name: "datastore | Ensure mount point directory exists"
+      ansible.builtin.file:
+        path: "{{ proxmox_pbs_datastore_path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    # --- Safety: check current filesystem ---
+    - name: "datastore | Check current filesystem type"
+      ansible.builtin.command: "blkid -o value -s TYPE {{ __datastore_device }}"
+      register: __datastore_current_fstype
+      changed_when: false
+      failed_when: false
+
+    # --- Wipe (only if not already the target fstype) ---
+    - name: "datastore | Wipe old filesystem signatures"
+      ansible.builtin.command: "wipefs --all --force {{ __datastore_device }}"
+      when: __datastore_current_fstype.stdout | default('') | trim != proxmox_pbs_datastore_fstype
+      become: true
+      changed_when: true
+
+    # --- Format ---
+    - name: "datastore | Format disk"
+      community.general.filesystem:
+        fstype: "{{ proxmox_pbs_datastore_fstype }}"
+        dev: "{{ __datastore_device }}"
+      become: true
+
+    # --- Mount ---
+    - name: "datastore | Mount disk"
+      ansible.posix.mount:
+        path: "{{ proxmox_pbs_datastore_path }}"
+        src: "{{ __datastore_device }}"
+        fstype: "{{ proxmox_pbs_datastore_fstype }}"
+        opts: "{{ proxmox_pbs_datastore_mount_opts }}"
+        state: mounted
+      become: true
+
+# Permissions — always applied, even if the disk was already mounted.
+# PBS runs as user 'backup', so the datastore directory must be writable by it.
+- name: "datastore | Set datastore permissions"
+  ansible.builtin.file:
+    path: "{{ proxmox_pbs_datastore_path }}"
+    state: directory
+    owner: backup
+    group: backup
+    mode: "0750"
+  become: true
+
+# --- Part B: Ensure services are running (required for CLI commands below) ---
+
+- name: "datastore | Ensure PBS services are started"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - proxmox-backup
+    - proxmox-backup-proxy
+  become: true
+
+# --- Part C: Create datastore ---
+
+- name: "datastore | Check if PBS datastore already exists"
+  ansible.builtin.command: "proxmox-backup-manager datastore list --output-format json"
+  register: __pbs_datastore_list
+  changed_when: false
+  become: true
+
+- name: "datastore | Parse datastore list"
+  ansible.builtin.set_fact:
+    __pbs_datastore_exists: "{{ proxmox_pbs_datastore_name in (__pbs_datastore_list.stdout | from_json | map(attribute='name') | list) }}"
+
+- name: "datastore | Create PBS datastore"
+  ansible.builtin.command: >
+    proxmox-backup-manager datastore create {{ proxmox_pbs_datastore_name }} {{ proxmox_pbs_datastore_path }}
+  become: true
+  changed_when: true
+  when: not __pbs_datastore_exists | bool
+
+# --- Part D: Update datastore (gc-schedule, comment) ---
+
+- name: "datastore | Get current datastore configuration"
+  ansible.builtin.command: "proxmox-backup-manager datastore list --output-format json"
+  register: __pbs_datastore_config
+  changed_when: false
+  become: true
+
+- name: "datastore | Parse current datastore settings"
+  ansible.builtin.set_fact:
+    __pbs_current_datastore: "{{ __pbs_datastore_config.stdout | from_json | selectattr('name', 'eq', proxmox_pbs_datastore_name) | list | first }}"
+
+- name: "datastore | Check if GC schedule update is needed"
+  ansible.builtin.set_fact:
+    __pbs_gc_needs_update: "{{ __pbs_current_datastore['gc-schedule'] | default('') != proxmox_pbs_gc_schedule }}"
+
+- name: "datastore | Update datastore GC schedule"
+  ansible.builtin.command: >
+    proxmox-backup-manager datastore update {{ proxmox_pbs_datastore_name }}
+    --gc-schedule "{{ proxmox_pbs_gc_schedule }}"
+    --comment "Homelab primary datastore"
+  become: true
+  changed_when: true
+  when: __pbs_gc_needs_update | bool
+
+# --- Part E: Prune job (schedule + retention) ---
+# NOTE: --keep-yearly is only passed when proxmox_pbs_keep_yearly > 0
+# (PBS rejects --keep-yearly 0 with "value must have a minimum value of 1")
+
+- name: "datastore | Build prune job command arguments"
+  ansible.builtin.set_fact:
+    __prune_create_args: >-
+      proxmox-backup-manager prune-job create pbs-prune
+      --store {{ proxmox_pbs_datastore_name }}
+      --schedule "{{ proxmox_pbs_prune_schedule }}"
+      --keep-daily {{ proxmox_pbs_keep_daily }}
+      --keep-weekly {{ proxmox_pbs_keep_weekly }}
+      --keep-monthly {{ proxmox_pbs_keep_monthly }}
+      {% if proxmox_pbs_keep_yearly | int > 0 %}--keep-yearly {{ proxmox_pbs_keep_yearly }}{% endif %}
+      --comment "Daily prune with retention 7/4/3"
+    __prune_update_args: >-
+      proxmox-backup-manager prune-job update pbs-prune
+      --schedule "{{ proxmox_pbs_prune_schedule }}"
+      --keep-daily {{ proxmox_pbs_keep_daily }}
+      --keep-weekly {{ proxmox_pbs_keep_weekly }}
+      --keep-monthly {{ proxmox_pbs_keep_monthly }}
+      {% if proxmox_pbs_keep_yearly | int > 0 %}--keep-yearly {{ proxmox_pbs_keep_yearly }}{% endif %}
+
+- name: "datastore | Check if prune job exists"
+  ansible.builtin.command: "proxmox-backup-manager prune-job list --output-format json"
+  register: __pbs_prune_jobs
+  changed_when: false
+  become: true
+
+- name: "datastore | Parse prune job list"
+  ansible.builtin.set_fact:
+    __pbs_prune_job_exists: "{{ 'pbs-prune' in (__pbs_prune_jobs.stdout | from_json | map(attribute='id') | list) }}"
+
+- name: "datastore | Create prune job"
+  ansible.builtin.command: "{{ __prune_create_args }}"
+  become: true
+  changed_when: true
+  when: not __pbs_prune_job_exists | bool
+
+- name: "datastore | Get current prune job config"
+  ansible.builtin.command: "proxmox-backup-manager prune-job list --output-format json"
+  register: __pbs_prune_config
+  changed_when: false
+  become: true
+  when: __pbs_prune_job_exists | bool
+
+- name: "datastore | Check if prune job update is needed"
+  vars:
+    __current_prune: "{{ __pbs_prune_config.stdout | from_json | selectattr('id', 'eq', 'pbs-prune') | list | first }}"
+  ansible.builtin.set_fact:
+    __pbs_prune_needs_update: "{{
+      __current_prune['schedule'] | default('') != proxmox_pbs_prune_schedule or
+      (__current_prune['keep-daily'] | default(0) | int) != (proxmox_pbs_keep_daily | int) or
+      (__current_prune['keep-weekly'] | default(0) | int) != (proxmox_pbs_keep_weekly | int) or
+      (__current_prune['keep-monthly'] | default(0) | int) != (proxmox_pbs_keep_monthly | int) or
+      (__current_prune['keep-yearly'] | default(0) | int) != (proxmox_pbs_keep_yearly | int)
+    }}"
+  when: __pbs_prune_job_exists | bool
+
+- name: "datastore | Update prune job"
+  ansible.builtin.command: "{{ __prune_update_args }}"
+  become: true
+  changed_when: true
+  when:
+    - __pbs_prune_job_exists | bool
+    - __pbs_prune_needs_update | bool
+
+# --- Part F: Verify job ---
+
+- name: "datastore | Check if verify job exists"
+  ansible.builtin.command: "proxmox-backup-manager verify-job list --output-format json"
+  register: __pbs_verify_jobs
+  changed_when: false
+  become: true
+
+- name: "datastore | Parse verify job list"
+  ansible.builtin.set_fact:
+    __pbs_verify_job_exists: "{{ 'pbs-verify' in (__pbs_verify_jobs.stdout | from_json | map(attribute='id') | list) }}"
+
+- name: "datastore | Create verify job"
+  ansible.builtin.command: >
+    proxmox-backup-manager verify-job create pbs-verify
+    --store {{ proxmox_pbs_datastore_name }}
+    --schedule "{{ proxmox_pbs_verify_schedule }}"
+    --comment "Weekly datastore verification"
+  become: true
+  changed_when: true
+  when: not __pbs_verify_job_exists | bool
+
+- name: "datastore | Get current verify job config"
+  ansible.builtin.command: "proxmox-backup-manager verify-job list --output-format json"
+  register: __pbs_verify_config
+  changed_when: false
+  become: true
+  when: __pbs_verify_job_exists | bool
+
+- name: "datastore | Check verify job update"
+  vars:
+    __current_verify: "{{ __pbs_verify_config.stdout | from_json | selectattr('id', 'eq', 'pbs-verify') | list | first }}"
+  ansible.builtin.set_fact:
+    __pbs_verify_needs_update: "{{ __current_verify['schedule'] | default('') != proxmox_pbs_verify_schedule }}"
+  when: __pbs_verify_job_exists | bool
+
+- name: "datastore | Update verify job schedule"
+  ansible.builtin.command: >
+    proxmox-backup-manager verify-job update pbs-verify
+    --schedule "{{ proxmox_pbs_verify_schedule }}"
+  become: true
+  changed_when: true
+  when:
+    - __pbs_verify_job_exists | bool
+    - __pbs_verify_needs_update | bool

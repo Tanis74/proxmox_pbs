@@ -1,0 +1,16 @@
+---
+- name: Include installation tasks
+  ansible.builtin.import_tasks: install.yml
+
+- name: Include swap tasks
+  ansible.builtin.import_tasks: swap.yml
+
+- name: Include datastore tasks
+  ansible.builtin.import_tasks: datastore.yml
+
+- name: Include auth tasks
+  ansible.builtin.import_tasks: auth.yml
+
+- name: Include sync tasks
+  ansible.builtin.import_tasks: sync.yml
+  when: proxmox_pbs_sync_enabled | bool

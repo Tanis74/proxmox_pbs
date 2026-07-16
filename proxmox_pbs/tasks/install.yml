@@ -1,0 +1,151 @@
+---
+# APT repository setup following official PBS docs:
+# https://pbs.proxmox.com/docs/installation.html#install-proxmox-backup-server-on-debian
+
+- name: "install | Remove enterprise repository (must happen before any apt update)"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/pbs-enterprise.list
+    - /etc/apt/sources.list.d/pbs-enterprise.sources
+  become: true
+  when: proxmox_pbs_remove_enterprise | bool
+
+- name: "install | Ensure prerequisite packages are installed"
+  ansible.builtin.apt:
+    name:
+      - gpg
+      - ca-certificates
+      - apt-transport-https
+      - python3-debian
+    state: present
+    update_cache: true
+  become: true
+
+- name: "install | Ensure APT keyrings directory exists"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: "install | Download Proxmox GPG key"
+  ansible.builtin.get_url:
+    url: "https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg"
+    dest: /usr/share/keyrings/proxmox-archive-keyring.gpg
+    owner: root
+    group: root
+    mode: "0644"
+    force: true
+  become: true
+
+- name: "install | Verify GPG key checksums"
+  when: proxmox_pbs_verify_gpg | bool
+  block:
+    - name: "install | Get GPG key SHA256 checksum"
+      ansible.builtin.stat:
+        path: /usr/share/keyrings/proxmox-archive-keyring.gpg
+        checksum_algorithm: sha256
+      register: __pbs_gpg_sha256
+
+    - name: "install | Assert GPG key SHA256 matches expected"
+      ansible.builtin.assert:
+        that:
+          - __pbs_gpg_sha256.stat.checksum == '136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45'
+        fail_msg: >
+          GPG key SHA256 mismatch.
+          Expected: 136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
+          Got: {{ __pbs_gpg_sha256.stat.checksum }}
+        success_msg: "GPG key SHA256 checksum verified"
+
+- name: "install | Configure Debian base repositories"
+  ansible.builtin.template:
+    src: debian.sources.j2
+    dest: /etc/apt/sources.list.d/debian.sources
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  become: true
+  when: proxmox_pbs_configure_debian_repos | bool
+
+- name: "install | Remove enterprise repository"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/pbs-enterprise.list
+    - /etc/apt/sources.list.d/pbs-enterprise.sources
+  become: true
+  when: proxmox_pbs_remove_enterprise | bool
+
+- name: "install | Remove legacy PBS .list repository (migrate to deb822)"
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/proxmox-pbs.list
+    state: absent
+  become: true
+
+- name: "install | Add PBS no-subscription repository (deb822 format)"
+  ansible.builtin.deb822_repository:
+    name: proxmox-pbs
+    types: deb
+    uris: http://download.proxmox.com/debian/pbs
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: pbs-no-subscription
+    signed_by: /usr/share/keyrings/proxmox-archive-keyring.gpg
+    state: present
+  become: true
+
+# Pre-flight: verify pinned version is available before attempting install.
+# Proxmox cleans old packages from no-subscription repo, so a pinned version
+# may have disappeared. This check fails early with a clear message instead
+# of a cryptic apt error.
+- name: "install | Update apt cache for version check"
+  ansible.builtin.apt:
+    update_cache: true
+  become: true
+  changed_when: false
+
+- name: "install | Check available PBS version"
+  ansible.builtin.shell: >
+    set -o pipefail &&
+    apt-cache policy proxmox-backup-server | grep -oP 'Candidate: \K.*'
+  args:
+    executable: /bin/bash
+  register: __pbs_available_version
+  changed_when: false
+
+- name: "install | Normalize version strings for comparison"
+  ansible.builtin.set_fact:
+    __pbs_candidate_clean: "{{ __pbs_available_version.stdout | regex_replace('^\\d+:', '') | trim }}"
+    __pbs_pinned_clean: "{{ proxmox_pbs_version | regex_replace('^\\d+:', '') | trim }}"
+
+- name: "install | Verify pinned PBS version is available"
+  ansible.builtin.assert:
+    that:
+      - proxmox_pbs_version == "" or __pbs_pinned_clean == __pbs_candidate_clean
+    fail_msg: >
+      Pinned PBS version {{ proxmox_pbs_version }} (normalized: {{ __pbs_pinned_clean }})
+      is NOT available in the repository.
+      Current candidate: {{ __pbs_available_version.stdout }} (normalized: {{ __pbs_candidate_clean }}).
+      Update proxmox_pbs_version in inventory to "{{ __pbs_candidate_clean }}"
+      (or set to "" to accept latest — not recommended for production).
+      Then commit the change — this is the IaC cycle.
+    success_msg: "PBS version {{ proxmox_pbs_version }} is available in the repository"
+
+- name: "install | Install proxmox-backup-server"
+  ansible.builtin.apt:
+    name: "proxmox-backup-server{% if proxmox_pbs_version != '' %}={{ proxmox_pbs_version }}{% endif %}"
+    state: present
+  become: true
+  notify: "Restart proxmox-backup"
+
+- name: "install | Hold proxmox-backup-server package"
+  ansible.builtin.dpkg_selections:
+    name: proxmox-backup-server
+    selection: hold
+  become: true
+  when: proxmox_pbs_version != ""

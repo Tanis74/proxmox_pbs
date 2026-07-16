@@ -1,0 +1,16 @@
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: collections.yml
+driver:
+  name: default
+platforms:
+  - name: pbs-test
+provisioner:
+  name: ansible
+  inventory:
+    links:
+      hosts: inventory/hosts.yml
+verifier:
+  name: ansible

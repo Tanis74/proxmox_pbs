@@ -1,0 +1,6 @@
+---
+- name: "PVE Backup | Register PBS storage on Proxmox VE"
+  ansible.builtin.import_tasks: storage.yml
+
+- name: "PVE Backup | Configure VZDump backup schedules"
+  ansible.builtin.import_tasks: schedule.yml

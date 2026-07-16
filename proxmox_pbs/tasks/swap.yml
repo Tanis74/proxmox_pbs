@@ -1,0 +1,55 @@
+---
+# Swap file creation — safety net against OOM during GC/verify on Celeron J4005 with 8 GB RAM.
+# Uses command module for fallocate/mkswap/swapon because ansible.builtin modules
+# for swap management don't handle file-based swap creation atomically.
+# Idempotency: skips if swap is already active.
+
+- name: "swap | Check if swap is already active"
+  ansible.builtin.set_fact:
+    __swap_already_active: "{{ ansible_facts.swapfree_mb | default(0) | int > 0 }}"
+
+- name: "swap | Skip swap creation"
+  ansible.builtin.debug:
+    msg: "Swap already active ({{ ansible_facts.swapfree_mb }} MB free). Skipping."
+  when: __swap_already_active | bool
+
+- name: "swap | Create swap file"
+  when:
+    - not __swap_already_active | bool
+    - proxmox_pbs_swap_size_mb | int > 0
+  block:
+    - name: "swap | Allocate swap file"
+      ansible.builtin.command: "fallocate -l {{ proxmox_pbs_swap_size_mb }}M {{ proxmox_pbs_swap_path }}"
+      args:
+        creates: "{{ proxmox_pbs_swap_path }}"
+      become: true
+      changed_when: true
+
+    - name: "swap | Set swap file permissions"
+      ansible.builtin.file:
+        path: "{{ proxmox_pbs_swap_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      become: true
+
+    - name: "swap | Make swap filesystem"
+      ansible.builtin.command: "mkswap {{ proxmox_pbs_swap_path }}"
+      become: true
+      changed_when: true
+
+    - name: "swap | Enable swap"
+      ansible.builtin.command: "swapon {{ proxmox_pbs_swap_path }}"
+      become: true
+      changed_when: true
+
+    - name: "swap | Add swap to fstab"
+      ansible.posix.mount:
+        name: none
+        src: "{{ proxmox_pbs_swap_path }}"
+        fstype: swap
+        opts: sw
+        passno: 0
+        dump: 0
+        state: present
+      become: true

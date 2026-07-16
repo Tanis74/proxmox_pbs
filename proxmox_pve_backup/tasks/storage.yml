@@ -1,0 +1,42 @@
+---
+# Register PBS datastore as storage on Proxmox VE.
+# Requires pbs_backup_token_secret from pbs.sops.yml (created by proxmox_pbs role).
+
+- name: "storage | Check if PBS storage already exists on PVE"
+  ansible.builtin.command: "pvesm status"
+  register: __pve_storage_list
+  changed_when: false
+
+- name: "storage | Determine if PBS storage is registered"
+  ansible.builtin.set_fact:
+    __pbs_storage_registered: "{{
+      __pve_storage_list.stdout_lines
+      | select('match', '^' + proxmox_pve_backup_pbs_datastore + '\\s')
+      | list | length > 0
+    }}"
+
+- name: "storage | Register PBS storage on Proxmox VE"
+  ansible.builtin.shell: |
+    echo '{{ pbs_backup_token_secret }}' > /tmp/.pbs_pass
+    pvesm add pbs {{ proxmox_pve_backup_pbs_datastore }} --server {{ proxmox_pve_backup_pbs_server }} --datastore {{ proxmox_pve_backup_pbs_datastore }} --username {{ proxmox_pve_backup_pbs_username }} --fingerprint {{ proxmox_pve_backup_pbs_fingerprint }} --password "$(cat /tmp/.pbs_pass)"
+    RC=$?
+    rm -f /tmp/.pbs_pass
+    exit $RC
+  changed_when: true
+  no_log: true
+  when: not __pbs_storage_registered | bool
+
+- name: "storage | Verify PBS storage was registered"
+  ansible.builtin.command: "pvesm status"
+  register: __pve_storage_verify
+  changed_when: false
+  when: not __pbs_storage_registered | bool
+
+- name: "storage | Confirm registration result"
+  ansible.builtin.debug:
+    msg: >
+      {% if __pve_storage_verify.stdout is defined and __pve_storage_verify.stdout is search(proxmox_pve_backup_pbs_datastore) %}
+      PBS storage '{{ proxmox_pve_backup_pbs_datastore }}' registered on Proxmox VE.
+      {% else %}
+      PBS storage '{{ proxmox_pve_backup_pbs_datastore }}' already registered.
+      {% endif %}

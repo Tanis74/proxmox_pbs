@@ -1,0 +1,107 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: "Verify | Gather package facts"
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: "Verify | Assert proxmox-backup-server is installed"
+      ansible.builtin.assert:
+        that:
+          - "'proxmox-backup-server' in ansible_facts.packages"
+        fail_msg: "PBS package not installed"
+        success_msg: "PBS package installed"
+
+    - name: "Verify | Gather service facts"
+      ansible.builtin.service_facts:
+
+    - name: "Verify | Assert PBS services are running"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['proxmox-backup.service'].state == 'running'
+          - ansible_facts.services['proxmox-backup-proxy.service'].state == 'running'
+        fail_msg: "PBS services not running"
+        success_msg: "PBS services running"
+
+    - name: "Verify | Check PBS web UI"
+      ansible.builtin.uri:
+        url: "https://localhost:8007"
+        validate_certs: false
+      register: __pbs_web
+      failed_when: false
+
+    - name: "Verify | Assert web UI reachable"
+      ansible.builtin.assert:
+        that:
+          - __pbs_web.status in [200, 401, 302, 303]
+        fail_msg: "PBS web UI not responding (status: {{ __pbs_web.status }})"
+        success_msg: "PBS web UI responding (status: {{ __pbs_web.status }})"
+
+    - name: "Verify | Check datastore exists"
+      ansible.builtin.command: "proxmox-backup-manager datastore list --output-format json"
+      register: __pbs_ds
+      changed_when: false
+      become: true
+
+    - name: "Verify | Assert datastore is configured"
+      ansible.builtin.assert:
+        that:
+          - "'pbs-datastore' in (__pbs_ds.stdout | from_json | map(attribute='name') | list)"
+        fail_msg: "Datastore not found"
+        success_msg: "Datastore configured"
+
+    - name: "Verify | Check prune job"
+      ansible.builtin.command: "proxmox-backup-manager prune-job list --output-format json"
+      register: __pbs_prune
+      changed_when: false
+      become: true
+
+    - name: "Verify | Assert prune job configured"
+      ansible.builtin.assert:
+        that:
+          - "'pbs-prune' in (__pbs_prune.stdout | from_json | map(attribute='id') | list)"
+        fail_msg: "Prune job not found"
+        success_msg: "Prune job configured"
+
+    - name: "Verify | Check verify job"
+      ansible.builtin.command: "proxmox-backup-manager verify-job list --output-format json"
+      register: __pbs_verify
+      changed_when: false
+      become: true
+
+    - name: "Verify | Assert verify job configured"
+      ansible.builtin.assert:
+        that:
+          - "'pbs-verify' in (__pbs_verify.stdout | from_json | map(attribute='id') | list)"
+        fail_msg: "Verify job not found"
+        success_msg: "Verify job configured"
+
+    - name: "Verify | Check users"
+      ansible.builtin.command: "proxmox-backup-manager user list --output-format json"
+      register: __pbs_users
+      changed_when: false
+      become: true
+
+    - name: "Verify | Assert backup and monitor users exist"
+      ansible.builtin.assert:
+        that:
+          - "'backup@pbs' in (__pbs_users.stdout | from_json | map(attribute='userid') | list)"
+          - "'monitor@pbs' in (__pbs_users.stdout | from_json | map(attribute='userid') | list)"
+        fail_msg: "PBS users not created"
+        success_msg: "PBS users created"
+
+    - name: "Verify | Check swap is active"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.swapfree_mb | default(0) | int > 0
+        fail_msg: "Swap not active"
+        success_msg: "Swap active ({{ ansible_facts.swapfree_mb }} MB free)"
+
+    - name: "Verify | Check datastore mount"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.mounts | selectattr('mount', 'eq', '/mnt/pbs-datastore') | list | length > 0
+        fail_msg: "Datastore not mounted"
+        success_msg: "Datastore mounted at /mnt/pbs-datastore"
