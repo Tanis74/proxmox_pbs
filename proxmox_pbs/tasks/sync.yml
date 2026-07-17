@@ -20,6 +20,9 @@
     --remote-store {{ proxmox_pbs_datastore_name }}
     --schedule "{{ proxmox_pbs_sync_schedule }}"
     --remove-vanished true
+    --keep-daily {{ proxmox_pbs_sync_keep_daily }}
+    --keep-weekly {{ proxmox_pbs_sync_keep_weekly }}
+    --keep-monthly {{ proxmox_pbs_sync_keep_monthly }}
   become: true
   changed_when: true
   when: not __pbs_sync_job_exists | bool
@@ -40,15 +43,21 @@
   ansible.builtin.set_fact:
     __pbs_sync_needs_update: "{{
       __pbs_current_sync['schedule'] | default('') != proxmox_pbs_sync_schedule or
-      __pbs_current_sync['remote'] | default('') != proxmox_pbs_sync_remote_path
+      __pbs_current_sync['remote'] | default('') != proxmox_pbs_sync_remote_path or
+      (__pbs_current_sync['keep-daily'] | default(0) | int) != (proxmox_pbs_sync_keep_daily | int) or
+      (__pbs_current_sync['keep-weekly'] | default(0) | int) != (proxmox_pbs_sync_keep_weekly | int) or
+      (__pbs_current_sync['keep-monthly'] | default(0) | int) != (proxmox_pbs_sync_keep_monthly | int)
     }}"
   when: __pbs_sync_job_exists | bool
 
-- name: "sync | Update sync job schedule and path"
+- name: "sync | Update sync job schedule, path, and retention"
   ansible.builtin.command: >
     proxmox-backup-manager sync-job update pbs-offsite-sync
     --schedule "{{ proxmox_pbs_sync_schedule }}"
     --remote {{ proxmox_pbs_sync_remote_path }}
+    --keep-daily {{ proxmox_pbs_sync_keep_daily }}
+    --keep-weekly {{ proxmox_pbs_sync_keep_weekly }}
+    --keep-monthly {{ proxmox_pbs_sync_keep_monthly }}
   become: true
   changed_when: true
   when:

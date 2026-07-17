@@ -25,42 +25,21 @@
     - proxmox_pbs_manage_datastore_disk | bool
     - not __datastore_already_mounted | bool
   block:
-    # --- Discovery ---
-    # Two strategies:
-    #   A) proxmox_pbs_datastore_device is set explicitly (e.g. /dev/sda2) → use it directly
-    #   B) proxmox_pbs_datastore_device is empty → auto-discover a CLEAN disk (no partitions)
-    # For the documented single-SSD topology (sda1=root, sda2=datastore), strategy A is required.
+    - name: "datastore | Fail if datastore device not specified"
+      ansible.builtin.fail:
+        msg: >
+          proxmox_pbs_datastore_device is required when proxmox_pbs_manage_datastore_disk is true.
+          Set it in inventory to the block device for the datastore (e.g., /dev/sda2).
+          Set proxmox_pbs_manage_datastore_disk to false if the disk is already provisioned.
+      when: proxmox_pbs_datastore_device | length == 0
+
     - name: "datastore | Use specified datastore device"
       ansible.builtin.set_fact:
         __datastore_device: "{{ proxmox_pbs_datastore_device }}"
-      when: proxmox_pbs_datastore_device | length > 0
 
-    - name: "datastore | Discover unpartitioned block device"
-      ansible.builtin.set_fact:
-        __datastore_device: "/dev/{{ item.key }}"
-      loop: "{{ ansible_devices | dict2items }}"
-      when:
-        - proxmox_pbs_datastore_device | length == 0
-        - item.value.partitions | length == 0
-        - item.key is not match("^sr")
-        - item.key is not match("^loop")
-        - __datastore_device is not defined
-
-    - name: "datastore | Fail if no suitable disk found"
-      ansible.builtin.fail:
-        msg: >
-          No suitable block device found for PBS datastore.
-          If your datastore is a partition on an already-partitioned disk
-          (e.g. /dev/sda2 on a single-SSD NUC), set proxmox_pbs_datastore_device
-          explicitly in your inventory. Auto-discovery only works for clean
-          unpartitioned disks (e.g. a dedicated second drive).
-          Set proxmox_pbs_manage_datastore_disk to false if the disk is already
-          provisioned and mounted.
-      when: __datastore_device is not defined
-
-    - name: "datastore | Display discovered device"
+    - name: "datastore | Display selected device"
       ansible.builtin.debug:
-        msg: "Found datastore device: {{ __datastore_device }}"
+        msg: "Using datastore device: {{ __datastore_device }}"
 
     - name: "datastore | Ensure mount point directory exists"
       ansible.builtin.file:

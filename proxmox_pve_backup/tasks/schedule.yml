@@ -7,6 +7,7 @@
   ansible.builtin.command: "pvesh get /cluster/backup --output-format json"
   register: __pve_backup_jobs_raw
   changed_when: false
+  become: true
 
 - name: "schedule | Parse backup job IDs"
   ansible.builtin.set_fact:

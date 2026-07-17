@@ -114,24 +114,32 @@
   when: proxmox_pbs_backup_user not in __pbs_users
 
 - name: "auth | Create backup API token"
-  ansible.builtin.shell: >
+  ansible.builtin.command: >
     proxmox-backup-manager user generate-token
     {{ proxmox_pbs_backup_user }}
     {{ proxmox_pbs_backup_token_name }}
     --comment "{{ proxmox_pbs_backup_token_comment }}"
-    | sed -n 's/.*"value": "\([^"]*\)".*/\1/p'
-  register: __pbs_backup_token_result
+  register: __pbs_backup_token_raw
   become: true
   changed_when: true
   no_log: true
   when: not __pbs_backup_token_exists | default(false) | bool
 
-- name: "auth | Set backup token secret from stdout"
+- name: "auth | Parse backup token secret"
   ansible.builtin.set_fact:
-    __pbs_backup_token_secret: "{{ __pbs_backup_token_result.stdout | trim }}"
+    __pbs_backup_token_secret: "{{
+      (__pbs_backup_token_raw.stdout | regex_replace('^Result:\\s*', '') | trim | from_json)['value']
+    }}"
   when:
-    - __pbs_backup_token_result.changed | default(false) | bool
+    - __pbs_backup_token_raw.changed | default(false) | bool
   no_log: true
+
+- name: "auth | Assert backup token secret is not empty"
+  ansible.builtin.assert:
+    that: __pbs_backup_token_secret | length > 0
+    fail_msg: "Failed to extract backup token secret from PBS output. PBS output format may have changed."
+  when:
+    - __pbs_backup_token_raw.changed | default(false) | bool
 
 - name: "auth | Check current backup ACL"
   ansible.builtin.command: "proxmox-backup-manager acl list --output-format json"
@@ -243,24 +251,32 @@
   when: proxmox_pbs_monitor_user not in __pbs_users
 
 - name: "auth | Create monitor API token"
-  ansible.builtin.shell: >
+  ansible.builtin.command: >
     proxmox-backup-manager user generate-token
     {{ proxmox_pbs_monitor_user }}
     {{ proxmox_pbs_monitor_token_name }}
     --comment "{{ proxmox_pbs_monitor_token_comment }}"
-    | sed -n 's/.*"value": "\([^"]*\)".*/\1/p'
-  register: __pbs_monitor_token_result
+  register: __pbs_monitor_token_raw
   become: true
   changed_when: true
   no_log: true
   when: not __pbs_monitor_token_exists | default(false) | bool
 
-- name: "auth | Set monitor token secret from stdout"
+- name: "auth | Parse monitor token secret"
   ansible.builtin.set_fact:
-    __pbs_monitor_token_secret: "{{ __pbs_monitor_token_result.stdout | trim }}"
+    __pbs_monitor_token_secret: "{{
+      (__pbs_monitor_token_raw.stdout | regex_replace('^Result:\\s*', '') | trim | from_json)['value']
+    }}"
   when:
-    - __pbs_monitor_token_result.changed | default(false) | bool
+    - __pbs_monitor_token_raw.changed | default(false) | bool
   no_log: true
+
+- name: "auth | Assert monitor token secret is not empty"
+  ansible.builtin.assert:
+    that: __pbs_monitor_token_secret | length > 0
+    fail_msg: "Failed to extract monitor token secret from PBS output. PBS output format may have changed."
+  when:
+    - __pbs_monitor_token_raw.changed | default(false) | bool
 
 - name: "auth | Check current monitor ACL"
   ansible.builtin.command: "proxmox-backup-manager acl list --output-format json"
@@ -325,36 +341,67 @@
   no_log: true
   when:
     - proxmox_pbs_auto_save_token | bool
-    - __pbs_backup_token_result.changed | default(false) | bool
-      or __pbs_monitor_token_result.changed | default(false) | bool
+    - __pbs_backup_token_raw.changed | default(false) | bool
+      or __pbs_monitor_token_raw.changed | default(false) | bool
 
-- name: "auth | Auto-save — encrypt secrets into SOPS file on controller"
-  ansible.builtin.shell: |
-    cat > /tmp/pbs_tokens.sops.yml << 'YEOF'
-    # PBS API tokens — auto-saved by proxmox_pbs role
-    pbs_backup_token_secret: "{{ __pbs_sops_backup_secret }}"
-    pbs_monitor_token_secret: "{{ __pbs_sops_monitor_secret }}"
-    YEOF
-    sops --encrypt --age {{ proxmox_pbs_sops_age_public_key }} /tmp/pbs_tokens.sops.yml > {{ proxmox_pbs_token_sops_file | quote }}
-    rm -f /tmp/pbs_tokens.sops.yml
-  delegate_to: localhost
-  become: false
-  changed_when: true
-  no_log: true
+- name: "auth | Auto-save — create temp file and encrypt to SOPS"
+  block:
+    - name: "auth | Auto-save — create temp file"
+      ansible.builtin.tempfile:
+        state: file
+        suffix: ".sops.yml"
+      register: __pbs_sops_tmpfile
+      delegate_to: localhost
+
+    - name: "auth | Auto-save — write secrets to temp file"
+      ansible.builtin.copy:
+        content: |
+          # PBS API tokens — auto-saved by proxmox_pbs role
+          pbs_backup_token_secret: "{{ __pbs_sops_backup_secret }}"
+          pbs_monitor_token_secret: "{{ __pbs_sops_monitor_secret }}"
+        dest: "{{ __pbs_sops_tmpfile.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      no_log: true
+
+    - name: "auth | Auto-save — encrypt to SOPS file"
+      ansible.builtin.command: >
+        sops --encrypt --age {{ proxmox_pbs_sops_age_public_key }}
+        {{ __pbs_sops_tmpfile.path }}
+      register: __pbs_sops_encrypted
+      delegate_to: localhost
+      changed_when: true
+      no_log: true
+
+    - name: "auth | Auto-save — write encrypted result"
+      ansible.builtin.copy:
+        content: "{{ __pbs_sops_encrypted.stdout }}"
+        dest: "{{ proxmox_pbs_token_sops_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      no_log: true
+  always:
+    - name: "auth | Auto-save — guaranteed temp file cleanup"
+      ansible.builtin.file:
+        path: "{{ __pbs_sops_tmpfile.path | default('') }}"
+        state: absent
+      delegate_to: localhost
+      when: __pbs_sops_tmpfile is defined and __pbs_sops_tmpfile.path | default('') != ''
+      failed_when: false
   when:
     - proxmox_pbs_auto_save_token | bool
-    - __pbs_backup_token_result.changed | default(false) | bool
-      or __pbs_monitor_token_result.changed | default(false) | bool
+    - __pbs_backup_token_raw.changed | default(false) | bool
+      or __pbs_monitor_token_raw.changed | default(false) | bool
 
 - name: "auth | Auto-save — silent confirmation"
   ansible.builtin.debug:
     msg: >
-      PBS tokens {{ 'created and' if __pbs_backup_token_result.changed | default(false) or __pbs_monitor_token_result.changed | default(false) else '' }}
+      PBS tokens {{ 'created and' if __pbs_backup_token_raw.changed | default(false) or __pbs_monitor_token_raw.changed | default(false) else '' }}
       saved to {{ proxmox_pbs_token_sops_file }} (auto-save).
   when:
     - proxmox_pbs_auto_save_token | bool
-    - __pbs_backup_token_result.changed | default(false) | bool
-      or __pbs_monitor_token_result.changed | default(false) | bool
+    - __pbs_backup_token_raw.changed | default(false) | bool
+      or __pbs_monitor_token_raw.changed | default(false) | bool
 
 - name: "auth | Display backup token secret (manual save mode)"
   ansible.builtin.debug:
@@ -372,7 +419,7 @@
   when:
     - proxmox_pbs_store_token_in_sops | bool
     - not (proxmox_pbs_auto_save_token | bool)
-    - __pbs_backup_token_result.changed | default(false) | bool
+    - __pbs_backup_token_raw.changed | default(false) | bool
 
 - name: "auth | Display monitor token secret (manual save mode)"
   ansible.builtin.debug:
@@ -390,7 +437,7 @@
   when:
     - proxmox_pbs_store_token_in_sops | bool
     - not (proxmox_pbs_auto_save_token | bool)
-    - __pbs_monitor_token_result.changed | default(false) | bool
+    - __pbs_monitor_token_raw.changed | default(false) | bool
 
 - name: "auth | Token storage reminder"
   ansible.builtin.debug:
@@ -403,5 +450,5 @@
   when:
     - proxmox_pbs_store_token_in_sops | bool
     - not (proxmox_pbs_auto_save_token | bool)
-    - not (__pbs_backup_token_result.changed | default(false) | bool)
-    - not (__pbs_monitor_token_result.changed | default(false) | bool)
+    - not (__pbs_backup_token_raw.changed | default(false) | bool)
+    - not (__pbs_monitor_token_raw.changed | default(false) | bool)

@@ -6,14 +6,7 @@ argument_specs:
       proxmox_pbs_version:
         description: "Pinned PBS package version. Set to '' to accept latest from repo."
         type: "str"
-        default: "4.2.2-1"
-      proxmox_pbs_repo_type:
-        description: "PBS repository type"
-        type: "str"
-        default: "no-subscription"
-        choices:
-          - "no-subscription"
-          - "enterprise"
+        default: "4.2.3-1"
       proxmox_pbs_verify_gpg:
         description: "Verify GPG key checksums after download"
         type: "bool"
@@ -26,22 +19,6 @@ argument_specs:
         description: "Remove enterprise repo file if present"
         type: "bool"
         default: true
-      proxmox_pbs_hostname:
-        description: "Short hostname"
-        type: "str"
-        default: "pbs"
-      proxmox_pbs_domain:
-        description: "DNS domain"
-        type: "str"
-        default: "lan.infracode.cz"
-      proxmox_pbs_configure_hosts:
-        description: "Configure /etc/hosts"
-        type: "bool"
-        default: true
-      proxmox_pbs_ip:
-        description: "Static IP address"
-        type: "str"
-        default: "10.10.10.201"
       proxmox_pbs_swap_size_mb:
         description: "Swap file size in MB (0 = skip creation)"
         type: "int"
@@ -71,7 +48,7 @@ argument_specs:
         type: "bool"
         default: true
       proxmox_pbs_datastore_device:
-        description: "Block device for datastore (empty = auto-discover)"
+        description: "Block device for datastore (REQUIRED, e.g., /dev/sda2)"
         type: "str"
         default: ""
       proxmox_pbs_prune_schedule:
